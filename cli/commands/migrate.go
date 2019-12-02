@@ -9,51 +9,44 @@ import (
 	"github.com/hasura/graphql-engine/cli"
 	"github.com/hasura/graphql-engine/cli/migrate"
 	mig "github.com/hasura/graphql-engine/cli/migrate/cmd"
-	_ "github.com/hasura/graphql-engine/cli/migrate/database/hasuradb"
-	_ "github.com/hasura/graphql-engine/cli/migrate/source/file"
+	"github.com/hasura/graphql-engine/cli/version"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
+
+	// Initialize migration drivers
+	_ "github.com/hasura/graphql-engine/cli/migrate/database/hasuradb"
+	_ "github.com/hasura/graphql-engine/cli/migrate/source/file"
 )
 
+// NewMigrateCmd returns the migrate command
 func NewMigrateCmd(ec *cli.ExecutionContext) *cobra.Command {
-	v := viper.New()
 	migrateCmd := &cobra.Command{
 		Use:          "migrate",
 		Short:        "Manage migrations on the database",
 		SilenceUsage: true,
-		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			ec.Viper = v
-			return ec.Validate()
-		},
 	}
 	migrateCmd.AddCommand(
 		newMigrateApplyCmd(ec),
 		newMigrateStatusCmd(ec),
 		newMigrateCreateCmd(ec),
+		newMigrateSquashCmd(ec),
 	)
-	f := migrateCmd.PersistentFlags()
-	f.String("endpoint", "", "http(s) endpoint for Hasura GraphQL Engine")
-	f.String("access-key", "", "access key for Hasura GraphQL Engine")
-
-	// need to create a new viper because https://github.com/spf13/viper/issues/233
-	v.BindPFlag("endpoint", f.Lookup("endpoint"))
-	v.BindPFlag("access_key", f.Lookup("access-key"))
 	return migrateCmd
 }
 
-func newMigrate(dir string, db *url.URL, accessKey string, logger *logrus.Logger) (*migrate.Migrate, error) {
-	dbURL := getDataPath(db, accessKey)
+func newMigrate(dir string, db *url.URL, adminSecretValue string, logger *logrus.Logger, v *version.Version, isCmd bool) (*migrate.Migrate, error) {
+	dbURL := getDataPath(db, getAdminSecretHeaderName(v), adminSecretValue)
 	fileURL := getFilePath(dir)
-	t, err := migrate.New(fileURL.String(), dbURL.String(), true, logger)
+	t, err := migrate.New(fileURL.String(), dbURL.String(), isCmd, logger)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot create migrate instance")
 	}
 	return t, nil
 }
 
-func executeMigration(cmd string, t *migrate.Migrate, stepOrVersion int64) error {
+// ExecuteMigration runs the actual migration
+func ExecuteMigration(cmd string, t *migrate.Migrate, stepOrVersion int64) error {
 	var err error
 
 	switch cmd {
@@ -85,10 +78,9 @@ func executeStatus(t *migrate.Migrate) (*migrate.Status, error) {
 	return status, nil
 }
 
-func getDataPath(nurl *url.URL, accessKey string) *url.URL {
+func getDataPath(nurl *url.URL, adminSecretHeader, adminSecretValue string) *url.URL {
 	host := &url.URL{
 		Scheme: "hasuradb",
-		User:   url.UserPassword("admin", accessKey),
 		Host:   nurl.Host,
 		Path:   nurl.Path,
 	}
@@ -99,6 +91,9 @@ func getDataPath(nurl *url.URL, accessKey string) *url.URL {
 		q.Set("sslmode", "enable")
 	default:
 		q.Set("sslmode", "disable")
+	}
+	if adminSecretValue != "" {
+		q.Add("headers", fmt.Sprintf("%s:%s", adminSecretHeader, adminSecretValue))
 	}
 	host.RawQuery = q.Encode()
 	return host
@@ -115,4 +110,23 @@ func getFilePath(dir string) *url.URL {
 		host.Path = "/" + host.Path
 	}
 	return host
+}
+
+const (
+	XHasuraAdminSecret = "X-Hasura-Admin-Secret"
+	XHasuraAccessKey   = "X-Hasura-Access-Key"
+)
+
+func getAdminSecretHeaderName(v *version.Version) string {
+	if v.ServerSemver == nil {
+		return XHasuraAdminSecret
+	}
+	flags, err := v.GetServerFeatureFlags()
+	if err != nil {
+		return XHasuraAdminSecret
+	}
+	if flags.HasAccessKey {
+		return XHasuraAccessKey
+	}
+	return XHasuraAdminSecret
 }

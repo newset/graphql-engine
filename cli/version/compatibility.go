@@ -1,23 +1,22 @@
 package version
 
-import (
-	"fmt"
-
-	"github.com/Masterminds/semver"
-)
-
 const (
 	untaggedBuild   = "for untagged builds, server and cli versions should match"
 	taggedBuild     = "cli version (major.minor) should be equal or ahead of server version, please update cli"
 	noServerVersion = "server with no version treated as pre-release build"
 	noCLIVersion    = "cli version is empty, indicates a broken build"
 	untaggedCLI     = "untagged cli build can work with tagged server build"
+	devCLI          = "dev version of cli, compatible with all servers"
 )
 
 // CheckCLIServerCompatibility compares server and cli for compatibility,
 // subject to certain conditions. compatible boolean is returned along with
 // a message which states the reason for the result.
 func (v *Version) CheckCLIServerCompatibility() (compatible bool, reason string) {
+	// mark dev builds as compatible
+	if v.CLI == "dev" {
+		return true, devCLI
+	}
 	// empty cli version
 	if v.CLI == "" {
 		return false, noCLIVersion
@@ -43,11 +42,7 @@ func (v *Version) CheckCLIServerCompatibility() (compatible bool, reason string)
 	if v.Server != "" && v.ServerSemver != nil {
 		// cli is also tagged build
 		if v.CLI != "" && v.CLISemver != nil {
-			c, err := semver.NewConstraint(fmt.Sprintf(">=%s", v.ServerSemver.String()))
-			if err != nil {
-				return false, "parsing server as constraint failed"
-			}
-			if c.Check(v.CLISemver) {
+			if (v.CLISemver.Major() >= v.ServerSemver.Major()) && (v.CLISemver.Minor() >= v.ServerSemver.Minor()) {
 				return true, taggedBuild
 			}
 			return false, taggedBuild

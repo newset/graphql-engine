@@ -1,42 +1,66 @@
-const checkExtraSlashes = url => {
-  if (!url) {
-    return url;
-  }
-  if (url[url.length - 1] === '/') {
-    return url.slice(0, url.length - 1);
-  }
-  return url;
-};
+import { SERVER_CONSOLE_MODE } from './constants';
+import { getFeaturesCompatibility } from './helpers/versionUtils';
+import { stripTrailingSlash } from './components/Common/utils/urlUtils';
+
+// TODO: move this section to a more appropriate location
+/* set helper tools into window */
+
+import sqlFormatter from './helpers/sql-formatter.min';
+import hljs from './helpers/highlight.min';
+
+if (
+  window &&
+  typeof window === 'object' &&
+  !window.sqlFormatter &&
+  !window.hljs
+) {
+  window.sqlFormatter = sqlFormatter;
+  window.hljs = hljs;
+}
+
+/* initialize globals */
+
+const isProduction = window.__env.nodeEnv !== 'development';
 
 const globals = {
   apiHost: window.__env.apiHost,
   apiPort: window.__env.apiPort,
-  dataApiUrl: checkExtraSlashes(window.__env.dataApiUrl),
-  nodeEnv: window.__env.nodeEnv,
-  devDataApiUrl: window.__env.devDataApiUrl,
-  accessKey: window.__env.accessKey,
-  consoleMode: window.__env.consoleMode,
-  urlPrefix: checkExtraSlashes(window.__env.urlPrefix),
+  dataApiUrl: stripTrailingSlash(window.__env.dataApiUrl), // overridden below if server mode
+  urlPrefix: stripTrailingSlash(window.__env.urlPrefix || '/'), // overridden below if server mode in production
+  adminSecret: window.__env.adminSecret || null, // gets updated after login/logout in server mode
+  isAdminSecretSet:
+    window.__env.isAdminSecretSet || window.__env.adminSecret || false,
+  consoleMode: window.__env.consoleMode || SERVER_CONSOLE_MODE,
+  enableTelemetry: window.__env.enableTelemetry,
+  telemetryTopic: isProduction ? 'console' : 'console_test',
+  assetsPath: window.__env.assetsPath,
+  serverVersion: window.__env.serverVersion,
+  consoleAssetVersion: CONSOLE_ASSET_VERSION, // set during console build
+  featuresCompatibility: window.__env.serverVersion
+    ? getFeaturesCompatibility(window.__env.serverVersion)
+    : null,
 };
 
-// set defaults
-if (!window.__env.urlPrefix) {
-  globals.urlPrefix = '/';
-}
+if (globals.consoleMode === SERVER_CONSOLE_MODE) {
+  if (isProduction) {
+    const consolePath = window.__env.consolePath;
+    if (consolePath) {
+      const currentUrl = stripTrailingSlash(window.location.href);
+      const currentPath = stripTrailingSlash(window.location.pathname);
 
-if (!window.__env.consoleMode) {
-  globals.consoleMode = 'hasuradb';
-}
+      globals.dataApiUrl = currentUrl.slice(
+        0,
+        currentUrl.lastIndexOf(consolePath)
+      );
 
-if (!window.__env.accessKey) {
-  globals.accessKey = null;
-}
+      globals.urlPrefix =
+        currentPath.slice(0, currentPath.lastIndexOf(consolePath)) + '/console';
+    } else {
+      const windowHostUrl =
+        window.location.protocol + '//' + window.location.host;
 
-if (globals.consoleMode === 'hasuradb') {
-  const windowUrl = window.location.protocol + '//' + window.location.host;
-  globals.dataApiUrl = windowUrl;
-  if (globals.nodeEnv === 'development') {
-    globals.dataApiUrl = globals.devDataApiUrl;
+      globals.dataApiUrl = windowHostUrl;
+    }
   }
 }
 

@@ -3,52 +3,42 @@ package commands
 import (
 	"encoding/json"
 	"io/ioutil"
+	"os"
 
 	"github.com/ghodss/yaml"
 	"github.com/hasura/graphql-engine/cli"
 	"github.com/hasura/graphql-engine/cli/migrate"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 func NewMetadataCmd(ec *cli.ExecutionContext) *cobra.Command {
-	v := viper.New()
 	metadataCmd := &cobra.Command{
 		Use:          "metadata",
-		Short:        "Manage Hausra GraphQL Engine metdata saved in the database",
+		Short:        "Manage Hasura GraphQL Engine metadata saved in the database",
 		SilenceUsage: true,
-		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			ec.Viper = v
-			return ec.Validate()
-		},
 	}
 	metadataCmd.AddCommand(
+		newMetadataDiffCmd(ec),
 		newMetadataExportCmd(ec),
-		newMetadataResetCmd(ec),
+		newMetadataClearCmd(ec),
+		newMetadataReloadCmd(ec),
 		newMetadataApplyCmd(ec),
 	)
-	f := metadataCmd.PersistentFlags()
-	f.String("endpoint", "", "http(s) endpoint for Hasura GraphQL Engine")
-	f.String("access-key", "", "access key for Hasura GraphQL Engine")
-
-	// need to create a new viper because https://github.com/spf13/viper/issues/233
-	v.BindPFlag("endpoint", f.Lookup("endpoint"))
-	v.BindPFlag("access_key", f.Lookup("access-key"))
 	return metadataCmd
 }
 
-func executeMetadata(cmd string, t *migrate.Migrate, metadataPath string) error {
+func executeMetadata(cmd string, t *migrate.Migrate, ec *cli.ExecutionContext) error {
 	switch cmd {
 	case "export":
 		metaData, err := t.ExportMetadata()
 		if err != nil {
-			return errors.Wrap(err, "Cannot export metadata")
+			return errors.Wrap(err, "cannot export metadata")
 		}
 
 		t, err := json.Marshal(metaData)
 		if err != nil {
-			return errors.Wrap(err, "Cannot Marshal metadata")
+			return errors.Wrap(err, "cannot Marshal metadata")
 		}
 
 		data, err := yaml.JSONToYAML(t)
@@ -56,31 +46,58 @@ func executeMetadata(cmd string, t *migrate.Migrate, metadataPath string) error 
 			return err
 		}
 
+		metadataPath, err := ec.GetMetadataFilePath("yaml")
+		if err != nil {
+			return errors.Wrap(err, "cannot save metadata")
+		}
+
 		err = ioutil.WriteFile(metadataPath, data, 0644)
 		if err != nil {
 			return errors.Wrap(err, "cannot save metadata")
 		}
-	case "reset":
+	case "clear":
 		err := t.ResetMetadata()
 		if err != nil {
-			return errors.Wrap(err, "Cannot reset Metadata")
+			return errors.Wrap(err, "cannot clear Metadata")
+		}
+	case "reload":
+		err := t.ReloadMetadata()
+		if err != nil {
+			return errors.Wrap(err, "cannot reload Metadata")
 		}
 	case "apply":
-		data, err := ioutil.ReadFile(metadataPath)
-		if err != nil {
-			return errors.Wrap(err, "cannot read metadata file")
+		var data interface{}
+		var metadataContent []byte
+		for _, format := range []string{"yaml", "json"} {
+			metadataPath, err := ec.GetMetadataFilePath(format)
+			if err != nil {
+				return errors.Wrap(err, "cannot apply metadata")
+			}
+
+			metadataContent, err = ioutil.ReadFile(metadataPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return err
+			}
+			break
 		}
 
-		var q interface{}
-		err = yaml.Unmarshal(data, &q)
+		if metadataContent == nil {
+			return errors.New("Unable to locate metadata.[yaml|json] file under migrations directory")
+		}
+
+		err := yaml.Unmarshal(metadataContent, &data)
 		if err != nil {
 			return errors.Wrap(err, "cannot parse metadata file")
 		}
 
-		err = t.ApplyMetadata(q)
+		err = t.ApplyMetadata(data)
 		if err != nil {
 			return errors.Wrap(err, "cannot apply metadata on the database")
 		}
+		return nil
 	}
 	return nil
 }

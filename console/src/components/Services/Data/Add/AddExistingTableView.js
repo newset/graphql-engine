@@ -8,13 +8,14 @@ import {
 } from './AddExistingTableViewActions';
 
 class AddExistingTableView extends Component {
-  componentWillMount() {
+  constructor(props) {
+    super(props);
     this.props.dispatch(setDefaults());
   }
 
   render() {
     const { dispatch, ongoingRequest, lastError, lastSuccess } = this.props;
-    const styles = require('../TableCommon/Table.scss');
+    const styles = require('../../../Common/TableCommon/Table.scss');
 
     let alert = null;
     if (ongoingRequest) {
@@ -46,7 +47,7 @@ class AddExistingTableView extends Component {
     return (
       <div
         className={
-          'container-fluid ' + styles.main_wrapper + ' ' + styles.padd_top
+          'container-fluid ' + styles.clear_fix + ' ' + styles.padd_top
         }
       >
         <Helmet title="Add Existing Table/View - Data | Hasura" />
@@ -78,12 +79,14 @@ class AddExistingTableView extends Component {
                 onChange={e => {
                   dispatch(setTableName(e.target.value));
                 }}
+                data-test="existing-table"
               />
               <hr />
               <input
                 value="Add"
                 type="submit"
                 className={'btn ' + styles.yellow_button}
+                data-test="add-existing-table-button"
               />
             </form>
             <div />

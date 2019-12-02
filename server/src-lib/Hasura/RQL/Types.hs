@@ -1,119 +1,83 @@
-{-# LANGUAGE ConstraintKinds       #-}
-{-# LANGUAGE FlexibleContexts      #-}
-{-# LANGUAGE FlexibleInstances     #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE TypeFamilies          #-}
-
 module Hasura.RQL.Types
-       ( HasSchemaCache(..)
-       , ProvidesFieldInfoMap(..)
-       , HDBQuery(..)
-       , SchemaCachePolicy(..)
-       , queryModifiesSchema
-
-       , P1
-       , P1C
-       , MonadTx(..)
-       , UserInfoM(..)
-       , RespBody
-       , P2C
-       -- , P2Res
+       ( P1
        , liftP1
-       , runP1
+       , liftP1WithQCtx
+       , MonadTx(..)
+
+       , UserInfoM(..)
        , successMsg
+
+       , HasHttpManager (..)
+       , HasGCtxMap (..)
+
+       , SQLGenCtx(..)
+       , HasSQLGenCtx(..)
+
+       , HasSystemDefined(..)
+       , HasSystemDefinedT
+       , runHasSystemDefinedT
 
        , QCtx(..)
        , HasQCtx(..)
        , mkAdminQCtx
        , askTabInfo
+       , isTableTracked
        , askFieldInfoMap
        , askPGType
        , assertPGCol
        , askRelType
        , askFieldInfo
        , askPGColInfo
+       , askComputedFieldInfo
        , askCurRole
+       , askEventTriggerInfo
+       , askTabInfoFromTrigger
 
-       , askQTemplateInfo
+       , updateComputedFieldFunctionDescription
 
        , adminOnly
-       , defaultTxErrorHandler
 
        , HeaderObj
 
+       , liftMaybe
        , module R
        ) where
 
-import           Hasura.RQL.Types.Common      as R
-import           Hasura.RQL.Types.DML         as R
-import           Hasura.RQL.Types.Error       as R
-import           Hasura.RQL.Types.Permission  as R
-import           Hasura.RQL.Types.SchemaCache as R
-import           Hasura.SQL.Types
+import           Hasura.EncJSON
 import           Hasura.Prelude
+import           Hasura.SQL.Types
 
-import qualified Database.PG.Query            as Q
+import           Hasura.Db                      as R
+import           Hasura.RQL.Types.BoolExp       as R
+import           Hasura.RQL.Types.Column        as R
+import           Hasura.RQL.Types.Common        as R
+import           Hasura.RQL.Types.ComputedField as R
+import           Hasura.RQL.Types.DML           as R
+import           Hasura.RQL.Types.Error         as R
+import           Hasura.RQL.Types.EventTrigger  as R
+import           Hasura.RQL.Types.Function      as R
+import           Hasura.RQL.Types.Metadata      as R
+import           Hasura.RQL.Types.Permission    as R
+import           Hasura.RQL.Types.RemoteSchema  as R
+import           Hasura.RQL.Types.SchemaCache   as R
 
-import           Data.Aeson
+import qualified Hasura.GraphQL.Context         as GC
 
-import qualified Data.ByteString.Lazy         as BL
-import qualified Data.HashMap.Strict          as M
-import qualified Data.Text                    as T
+import qualified Data.HashMap.Strict            as M
+import qualified Data.Text                      as T
+import qualified Network.HTTP.Client            as HTTP
 
-class ProvidesFieldInfoMap r where
-  getFieldInfoMap :: QualifiedTable -> r -> Maybe FieldInfoMap
-
-class HasSchemaCache a where
-  getSchemaCache :: a -> SchemaCache
-
-instance HasSchemaCache QCtx where
-  getSchemaCache = qcSchemaCache
-
-instance HasSchemaCache SchemaCache where
-  getSchemaCache = id
-
-instance ProvidesFieldInfoMap SchemaCache where
-  getFieldInfoMap tn =
-    fmap tiFieldInfoMap . M.lookup tn . scTables
-
--- There are two phases to every query.
--- Phase 1 : Use the cached env to validate or invalidate
--- Phase 2 : Hit Postgres if need to
-
-class HDBQuery q where
-  type Phase1Res q -- Phase 1 result
-
-  -- Use QCtx
-  phaseOne :: q -> P1 (Phase1Res q)
-
-  -- Hit Postgres
-  phaseTwo :: q -> Phase1Res q -> P2 BL.ByteString
-
-  schemaCachePolicy :: SchemaCachePolicy q
-
-data SchemaCachePolicy a
-  = SCPReload
-  | SCPNoChange
-  deriving (Show, Eq)
-
-schemaCachePolicyToBool :: SchemaCachePolicy a -> Bool
-schemaCachePolicyToBool SCPReload   = True
-schemaCachePolicyToBool SCPNoChange = False
-
-getSchemaCachePolicy :: (HDBQuery a) => a -> SchemaCachePolicy a
-getSchemaCachePolicy _ = schemaCachePolicy
-
-type RespBody = BL.ByteString
-
-queryModifiesSchema :: (HDBQuery q) => q -> Bool
-queryModifiesSchema =
-  schemaCachePolicyToBool . getSchemaCachePolicy
+getFieldInfoMap
+  :: QualifiedTable
+  -> SchemaCache -> Maybe (FieldInfoMap PGColumnInfo)
+getFieldInfoMap tn =
+  fmap _tiFieldInfoMap . M.lookup tn . scTables
 
 data QCtx
   = QCtx
   { qcUserInfo    :: !UserInfo
   , qcSchemaCache :: !SchemaCache
+  , qcSQLCtx      :: !SQLGenCtx
   } deriving (Show, Eq)
 
 class HasQCtx a where
@@ -122,34 +86,47 @@ class HasQCtx a where
 instance HasQCtx QCtx where
   getQCtx = id
 
-mkAdminQCtx :: SchemaCache -> QCtx
-mkAdminQCtx = QCtx adminUserInfo
-
-type P2 = StateT SchemaCache (ReaderT UserInfo (Q.TxE QErr))
+mkAdminQCtx :: SQLGenCtx -> SchemaCache ->  QCtx
+mkAdminQCtx soc sc = QCtx adminUserInfo sc soc
 
 class (Monad m) => UserInfoM m where
   askUserInfo :: m UserInfo
 
-type P1C m = (UserInfoM m, QErrM m, CacheRM m)
+instance (UserInfoM m) => UserInfoM (ReaderT r m) where
+  askUserInfo = lift askUserInfo
 
 askTabInfo
   :: (QErrM m, CacheRM m)
-  => QualifiedTable -> m TableInfo
+  => QualifiedTable -> m (TableInfo PGColumnInfo)
 askTabInfo tabName = do
   rawSchemaCache <- askSchemaCache
   liftMaybe (err400 NotExists errMsg) $ M.lookup tabName $ scTables rawSchemaCache
   where
     errMsg = "table " <> tabName <<> " does not exist"
 
-askQTemplateInfo
-  :: (P1C m)
-  => TQueryName
-  -> m QueryTemplateInfo
-askQTemplateInfo qtn = do
-  rawSchemaCache <- askSchemaCache
-  liftMaybe (err400 NotExists errMsg) $ M.lookup qtn $ scQTemplates rawSchemaCache
+isTableTracked :: SchemaCache -> QualifiedTable -> Bool
+isTableTracked sc qt =
+  isJust $ M.lookup qt $ scTables sc
+
+askTabInfoFromTrigger
+  :: (QErrM m, CacheRM m)
+  => TriggerName -> m (TableInfo PGColumnInfo)
+askTabInfoFromTrigger trn = do
+  sc <- askSchemaCache
+  let tabInfos = M.elems $ scTables sc
+  liftMaybe (err400 NotExists errMsg) $ find (isJust.M.lookup trn._tiEventTriggerInfoMap) tabInfos
   where
-    errMsg = "query-template " <> qtn <<> " does not exist"
+    errMsg = "event trigger " <> triggerNameToTxt trn <<> " does not exist"
+
+askEventTriggerInfo
+  :: (QErrM m, CacheRM m)
+  => TriggerName -> m EventTriggerInfo
+askEventTriggerInfo trn = do
+  ti <- askTabInfoFromTrigger trn
+  let etim = _tiEventTriggerInfoMap ti
+  liftMaybe (err400 NotExists errMsg) $ M.lookup trn etim
+  where
+    errMsg = "event trigger " <> triggerNameToTxt trn <<> " does not exist"
 
 instance UserInfoM P1 where
   askUserInfo = qcUserInfo <$> ask
@@ -157,72 +134,158 @@ instance UserInfoM P1 where
 instance CacheRM P1 where
   askSchemaCache = qcSchemaCache <$> ask
 
-instance UserInfoM P2 where
-  askUserInfo = ask
+instance HasSQLGenCtx P1 where
+  askSQLGenCtx = qcSQLCtx <$> ask
 
-type P2C m = (QErrM m, CacheRWM m, MonadTx m)
+class (Monad m) => HasHttpManager m where
+  askHttpManager :: m HTTP.Manager
 
-class (Monad m) => MonadTx m where
-  liftTx :: Q.TxE QErr a -> m a
+instance (HasHttpManager m) => HasHttpManager (ReaderT r m) where
+  askHttpManager = lift askHttpManager
 
-instance (MonadTx m) => MonadTx (StateT s m) where
-  liftTx = lift . liftTx
+class (Monad m) => HasGCtxMap m where
+  askGCtxMap :: m GC.GCtxMap
 
-instance (MonadTx m) => MonadTx (ReaderT s m) where
-  liftTx = lift . liftTx
+instance (HasGCtxMap m) => HasGCtxMap (ReaderT r m) where
+  askGCtxMap = lift askGCtxMap
 
-instance MonadTx (Q.TxE QErr) where
-  liftTx = id
+newtype SQLGenCtx
+  = SQLGenCtx
+  { stringifyNum :: Bool
+  } deriving (Show, Eq)
 
-type P1 = ExceptT QErr (Reader QCtx)
+class (Monad m) => HasSQLGenCtx m where
+  askSQLGenCtx :: m SQLGenCtx
 
-runP1 :: QCtx -> P1 a -> Either QErr a
-runP1 qEnv m = runReader (runExceptT m) qEnv
+instance (HasSQLGenCtx m) => HasSQLGenCtx (ReaderT r m) where
+  askSQLGenCtx = lift askSQLGenCtx
+
+class (Monad m) => HasSystemDefined m where
+  askSystemDefined :: m SystemDefined
+
+instance (HasSystemDefined m) => HasSystemDefined (ReaderT r m) where
+  askSystemDefined = lift askSystemDefined
+
+newtype HasSystemDefinedT m a
+  = HasSystemDefinedT { unHasSystemDefinedT :: ReaderT SystemDefined m a }
+  deriving ( Functor, Applicative, Monad, MonadTrans, MonadIO, MonadError e, MonadTx
+           , HasHttpManager, HasSQLGenCtx, CacheRM, CacheRWM, UserInfoM )
+
+runHasSystemDefinedT :: SystemDefined -> HasSystemDefinedT m a -> m a
+runHasSystemDefinedT systemDefined = flip runReaderT systemDefined . unHasSystemDefinedT
+
+instance (Monad m) => HasSystemDefined (HasSystemDefinedT m) where
+  askSystemDefined = HasSystemDefinedT ask
+
+type ER e r = ExceptT e (Reader r)
+type P1 = ER QErr QCtx
+
+runER :: r -> ER e r a -> Either e a
+runER r m = runReader (runExceptT m) r
 
 liftMaybe :: (QErrM m) => QErr -> Maybe a -> m a
 liftMaybe e = maybe (throwError e) return
 
-liftP1 :: (MonadError QErr m) => QCtx -> P1 a -> m a
-liftP1 r m = liftEither $ runP1 r m
+liftP1
+  :: ( QErrM m
+     , UserInfoM m
+     , CacheRM m
+     , HasSQLGenCtx m
+     ) => P1 a -> m a
+liftP1 m = do
+  ui <- askUserInfo
+  sc <- askSchemaCache
+  sqlCtx <- askSQLGenCtx
+  let qCtx = QCtx ui sc sqlCtx
+  liftP1WithQCtx qCtx m
+
+liftP1WithQCtx
+  :: (MonadError e m) => r -> ER e r a -> m a
+liftP1WithQCtx r m =
+  liftEither $ runER r m
 
 askFieldInfoMap
   :: (QErrM m, CacheRM m)
-  => QualifiedTable -> m FieldInfoMap
+  => QualifiedTable -> m (FieldInfoMap PGColumnInfo)
 askFieldInfoMap tabName = do
   mFieldInfoMap <- getFieldInfoMap tabName <$> askSchemaCache
   maybe (throw400 NotExists errMsg) return mFieldInfoMap
   where
     errMsg = "table " <> tabName <<> " does not exist"
 
-askPGType :: (MonadError QErr m)
-          => FieldInfoMap
-          -> PGCol
-          -> T.Text
-          -> m PGColType
-askPGType m c msg = do
-  colInfo <- modifyErr ("column " <>) $
+askPGType
+  :: (MonadError QErr m)
+  => FieldInfoMap PGColumnInfo
+  -> PGCol
+  -> T.Text
+  -> m PGColumnType
+askPGType m c msg =
+  pgiType <$> askPGColInfo m c msg
+
+askPGColInfo
+  :: (MonadError QErr m)
+  => FieldInfoMap columnInfo
+  -> PGCol
+  -> T.Text
+  -> m columnInfo
+askPGColInfo m c msg = do
+  fieldInfo <- modifyErr ("column " <>) $
              askFieldInfo m (fromPGCol c)
-  case colInfo of
-    (FIColumn pgColInfo) ->
-      return $ pgiType pgColInfo
-    _                      ->
+  case fieldInfo of
+    (FIColumn pgColInfo) -> pure pgColInfo
+    (FIRelationship   _) -> throwErr "relationship"
+    (FIComputedField _)  -> throwErr "computed field"
+  where
+    throwErr fieldType =
       throwError $ err400 UnexpectedPayload $ mconcat
       [ "expecting a postgres column; but, "
-      , c <<> " is a relationship; "
+      , c <<> " is a " <> fieldType <> "; "
       , msg
       ]
 
+askComputedFieldInfo
+  :: (MonadError QErr m)
+  => FieldInfoMap columnInfo
+  -> ComputedFieldName
+  -> m ComputedFieldInfo
+askComputedFieldInfo fields computedField = do
+  fieldInfo <- modifyErr ("computed field " <>) $
+               askFieldInfo fields $ fromComputedField computedField
+  case fieldInfo of
+    (FIColumn           _) -> throwErr "column"
+    (FIRelationship     _) -> throwErr "relationship"
+    (FIComputedField cci)  -> pure cci
+  where
+    throwErr fieldType =
+      throwError $ err400 UnexpectedPayload $ mconcat
+      [ "expecting a computed field; but, "
+      , computedField <<> " is a " <> fieldType <> "; "
+      ]
+
+updateComputedFieldFunctionDescription
+  :: (QErrM m, CacheRWM m)
+  => QualifiedTable -> ComputedFieldName -> Maybe PGDescription -> m ()
+updateComputedFieldFunctionDescription table computedField description = do
+  fields <- _tiFieldInfoMap <$> askTabInfo table
+  computedFieldInfo <- askComputedFieldInfo fields computedField
+  deleteComputedFieldFromCache table computedField
+  let updatedComputedFieldInfo = computedFieldInfo
+                                  { _cfiFunction = (_cfiFunction computedFieldInfo)
+                                                   {_cffDescription = description}
+                                  }
+  addComputedFieldToCache table updatedComputedFieldInfo
+
 assertPGCol :: (MonadError QErr m)
-            => FieldInfoMap
+            => FieldInfoMap columnInfo
             -> T.Text
             -> PGCol
             -> m ()
 assertPGCol m msg c = do
-  _ <- askPGType m c msg
+  _ <- askPGColInfo m c msg
   return ()
 
 askRelType :: (MonadError QErr m)
-           => FieldInfoMap
+           => FieldInfoMap columnInfo
            -> RelName
            -> T.Text
            -> m RelInfo
@@ -239,27 +302,15 @@ askRelType m r msg = do
       ]
 
 askFieldInfo :: (MonadError QErr m)
-           => FieldInfoMap
+           => FieldInfoMap columnInfo
            -> FieldName
-           -> m FieldInfo
+           -> m (FieldInfo columnInfo)
 askFieldInfo m f =
   case M.lookup f m of
   Just colInfo -> return colInfo
   Nothing ->
     throw400 NotExists $ mconcat
     [ f <<> " does not exist"
-    ]
-
-askPGColInfo :: (MonadError QErr m)
-             => M.HashMap PGCol PGColInfo
-             -> PGCol
-             -> m PGColInfo
-askPGColInfo m c =
-  case M.lookup c m of
-  Just colInfo -> return colInfo
-  Nothing ->
-    throw400 NotExists $ mconcat
-    [ c <<> " does not exist"
     ]
 
 askCurRole :: (UserInfoM m) => m RoleName
@@ -272,12 +323,7 @@ adminOnly = do
   where
     errMsg = "restricted access : admin only"
 
-defaultTxErrorHandler :: Q.PGTxErr -> QErr
-defaultTxErrorHandler txe =
-  let e = err500 PostgresError "postgres query error"
-  in e {qeInternal = Just $ toJSON txe}
-
-successMsg :: BL.ByteString
+successMsg :: EncJSON
 successMsg = "{\"message\":\"success\"}"
 
 type HeaderObj = M.HashMap T.Text T.Text

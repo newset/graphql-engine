@@ -31,7 +31,7 @@ var drivers = make(map[string]Driver)
 //   * Drivers are supposed to be read only.
 //   * Ideally don't load any contents (into memory) in Open or WithInstance.
 type Driver interface {
-	// Open returns a a new driver instance configured with parameters
+	// Open returns a new driver instance configured with parameters
 	// coming from the URL string. Migrate will call this function
 	// only once per instance.
 	Open(url string, logger *log.Logger) (Driver, error)
@@ -39,6 +39,8 @@ type Driver interface {
 	// Close closes the underlying source instance managed by the driver.
 	// Migrate will call this function only once per instance.
 	Close() error
+
+	Scan() error
 
 	// First returns the very first migration version available to the driver.
 	// Migrate will call this function multiple times.
@@ -90,6 +92,10 @@ type Driver interface {
 	// it must return os.ErrNotExist.
 	// Do not start reading, just return the ReadCloser!
 	ReadMetaDown(version uint64) (r io.ReadCloser, identifier string, fileName string, err error)
+
+	// ReadName returns an name that helps
+	// finding this migration in the source for a given version
+	ReadName(version uint64) (name string)
 }
 
 // Open returns a new driver instance.

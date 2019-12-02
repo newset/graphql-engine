@@ -1,22 +1,27 @@
 import PropTypes from 'prop-types';
 import React, { Component } from 'react';
 import AceEditor from 'react-ace';
-import ViewHeader from '../TableBrowseRows/ViewHeader';
+import TableHeader from '../TableCommon/TableHeader';
 import {
   fetchViewDefinition,
   deleteViewSql,
   untrackTableSql,
   RESET,
-} from '../TableModify/ModifyActions';
+} from './ModifyActions';
+import TableCommentEditor from './TableCommentEditor';
 import { ordinalColSort } from '../utils';
 import { setTable } from '../DataActions';
+import Button from '../../../Common/Button/Button';
+import { NotFoundError } from '../../../Error/PageNotFound';
+
+import { getConfirmation } from '../../../Common/utils/jsUtils';
 
 class ModifyView extends Component {
   componentDidMount() {
-    this.props.dispatch({ type: RESET });
-
-    this.props.dispatch(setTable(this.props.tableName));
-    this.props.dispatch(fetchViewDefinition(this.props.tableName, false));
+    const { dispatch } = this.props;
+    dispatch({ type: RESET });
+    dispatch(setTable(this.props.tableName));
+    dispatch(fetchViewDefinition(this.props.tableName, false));
   }
 
   modifyViewDefinition = viewName => {
@@ -35,11 +40,22 @@ class ModifyView extends Component {
       lastSuccess,
       dispatch,
       currentSchema,
+      tableCommentEdit,
+      migrationMode,
     } = this.props;
 
-    const styles = require('./Modify.scss');
+    const styles = require('./ModifyTable.scss');
 
-    const tableSchema = allSchemas.find(t => t.table_name === tableName); // eslint-disable-line no-unused-vars
+    const tableSchema = allSchemas.find(
+      t => t.table_name === tableName && t.table_schema === currentSchema
+    );
+
+    if (!tableSchema) {
+      // throw a 404 exception
+      throw new NotFoundError();
+    }
+
+    const tableComment = tableSchema.comment;
 
     let alert = null;
     if (ongoingRequest) {
@@ -67,17 +83,16 @@ class ModifyView extends Component {
 
     const columns = tableSchema.columns.sort(ordinalColSort);
     const columnEditors = columns.map((c, i) => {
-      const btnText = '-';
       const bg = '';
       return (
         <div key={i} className={bg}>
           <div className="container-fluid">
-            <div className="row">
-              <h5 className={styles.padd_bottom}>
-                <button disabled="disabled" className="btn btn-xs btn-warning">
-                  {btnText}
-                </button>{' '}
-                &nbsp; {c.column_name}
+            <div className={`row + ${styles.add_mar_bottom}`}>
+              <h5>
+                <Button disabled="disabled" size="xs">
+                  -
+                </Button>{' '}
+                &nbsp; <b>{c.column_name}</b>
               </h5>
             </div>
           </div>
@@ -85,12 +100,30 @@ class ModifyView extends Component {
       );
     });
 
-    const untrackBtn = (
-      <button
+    const modifyBtn = (
+      <Button
         type="submit"
-        className={styles.add_mar_right + ' btn btn-sm btn-default'}
+        color="yellow"
+        size="sm"
+        className={styles.add_mar_right}
         onClick={() => {
-          const isOk = confirm('Are you sure to untrack?');
+          this.modifyViewDefinition(tableName);
+        }}
+        data-test="modify-view"
+      >
+        Modify
+      </Button>
+    );
+
+    const untrackBtn = (
+      <Button
+        type="submit"
+        className={styles.add_mar_right}
+        color="white"
+        size="sm"
+        onClick={() => {
+          const confirmMessage = `This will remove the view "${tableName}" from the GraphQL schema`;
+          const isOk = getConfirmation(confirmMessage);
           if (isOk) {
             dispatch(untrackTableSql(tableName));
           }
@@ -98,25 +131,48 @@ class ModifyView extends Component {
         data-test="untrack-view"
       >
         Untrack View
-      </button>
+      </Button>
+    );
+
+    const deleteBtn = (
+      <Button
+        type="submit"
+        color="red"
+        size="sm"
+        onClick={() => {
+          const confirmMessage = `This will permanently delete the view "${tableName}" from the database`;
+          const isOk = getConfirmation(confirmMessage, true, tableName);
+          if (isOk) {
+            dispatch(deleteViewSql(tableName));
+          }
+        }}
+        data-test="delete-view"
+      >
+        Delete view
+      </Button>
     );
 
     return (
       <div className={styles.container + ' container-fluid'}>
-        <ViewHeader
+        <TableHeader
           dispatch={dispatch}
-          tableName={tableName}
+          table={tableSchema}
           tabName="modify"
-          currentSchema={currentSchema}
+          migrationMode={migrationMode}
         />
         <br />
         <div className={'container-fluid ' + styles.padd_left_remove}>
           <div className={'col-xs-8 ' + styles.padd_left_remove}>
+            <TableCommentEditor
+              tableComment={tableComment}
+              tableCommentEdit={tableCommentEdit}
+              isTable={false}
+              dispatch={dispatch}
+            />
             <h4 className={styles.subheading_text}>Columns</h4>
             {columnEditors}
             <br />
             <h4>View Definition:</h4>
-
             <AceEditor
               mode="sql"
               theme="github"
@@ -129,35 +185,9 @@ class ModifyView extends Component {
               readOnly
             />
             <hr />
-            <button
-              type="submit"
-              className={
-                'btn btn-sm ' +
-                styles.yellow_button +
-                ' ' +
-                styles.add_mar_right
-              }
-              onClick={() => {
-                this.modifyViewDefinition(tableName);
-              }}
-              data-test="modify-view"
-            >
-              Modify
-            </button>
+            {modifyBtn}
             {untrackBtn}
-            <button
-              type="submit"
-              className={'btn btn-sm btn-danger'}
-              onClick={() => {
-                const isOk = confirm('Are you sure');
-                if (isOk) {
-                  dispatch(deleteViewSql(tableName));
-                }
-              }}
-              data-test="delete-view"
-            >
-              Delete view
-            </button>
+            {deleteBtn}
             <br />
             <br />
           </div>
@@ -178,6 +208,7 @@ ModifyView.propTypes = {
   lastError: PropTypes.object,
   lastSuccess: PropTypes.bool,
   dispatch: PropTypes.func.isRequired,
+  serverVersion: PropTypes.string,
 };
 
 const mapStateToProps = (state, ownProps) => {
@@ -186,6 +217,8 @@ const mapStateToProps = (state, ownProps) => {
     allSchemas: state.tables.allSchemas,
     sql: state.rawSQL.sql,
     currentSchema: state.tables.currentSchema,
+    migrationMode: state.main.migrationMode,
+    serverVersion: state.main.serverVersion,
     ...state.tables.modify,
   };
 };

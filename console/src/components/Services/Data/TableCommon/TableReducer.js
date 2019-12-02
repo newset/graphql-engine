@@ -1,35 +1,47 @@
-import { defaultModifyState, defaultPermissionsState } from '../DataState';
+import {
+  defaultModifyState,
+  defaultPermissionsState,
+  defaultPresetsState,
+} from '../DataState';
 
 import { MAKE_REQUEST, REQUEST_SUCCESS, REQUEST_ERROR } from '../DataActions';
 
 // TABLE MODIFY
 
 import {
-  TOGGLE_ACTIVE_COLUMN,
-  RESET,
   VIEW_DEF_REQUEST_SUCCESS,
   VIEW_DEF_REQUEST_ERROR,
-  FK_SET_REF_TABLE,
-  FK_SET_L_COL,
-  FK_SET_R_COL,
-  FK_ADD_FORM_ERROR,
-  FK_RESET,
-  TOGGLE_FK_CHECKBOX,
+  TABLE_COMMENT_EDIT,
+  TABLE_COMMENT_INPUT_EDIT,
+  SET_COLUMN_EDIT,
+  RESET_COLUMN_EDIT,
+  EDIT_COLUMN,
+  SET_PRIMARY_KEYS,
+  SET_FOREIGN_KEYS,
+  FETCH_COLUMN_TYPE_CASTS,
+  FETCH_COLUMN_TYPE_CASTS_FAIL,
+  RESET,
+  SET_UNIQUE_KEYS,
+  TOGGLE_ENUM,
+  TOGGLE_ENUM_SUCCESS,
+  TOGGLE_ENUM_FAILURE,
+  MODIFY_ROOT_FIELD,
+  SET_CHECK_CONSTRAINTS,
 } from '../TableModify/ModifyActions';
 
 // TABLE RELATIONSHIPS
 
 import {
-  REL_SET_TYPE,
-  REL_SET_RTABLE,
-  REL_SET_LCOL,
-  REL_SET_RCOL,
-  REL_RESET,
-  REL_SELECTION_CHANGED,
+  MANUAL_REL_SET_TYPE,
+  MANUAL_REL_SET_RSCHEMA,
+  MANUAL_REL_SET_RTABLE,
+  MANUAL_REL_NAME_CHANGED,
+  SET_MANUAL_REL_ADD,
   REL_NAME_CHANGED,
+  REL_RESET,
+  MANUAL_REL_RESET,
+  REL_SELECTION_CHANGED,
   REL_ADD_NEW_CLICKED,
-  REL_SET_MANUAL_COLUMNS,
-  REL_ADD_MANUAL_CLICKED,
 } from '../TableRelationships/Actions';
 
 // TABLE PERMISSIONS
@@ -41,18 +53,31 @@ import {
   PERM_TOGGLE_COLUMN,
   PERM_TOGGLE_ALL_COLUMNS,
   PERM_ALLOW_ALL,
+  PERM_TOGGLE_MODIFY_LIMIT,
   PERM_TOGGLE_ALLOW_UPSERT,
+  PERM_TOGGLE_ALLOW_AGGREGATION,
   PERM_CUSTOM_CHECKED,
   PERM_REMOVE_ACCESS,
   PERM_SAVE_PERMISSIONS,
   PERM_CLOSE_EDIT,
   PERM_SET_ROLE_NAME,
+  PERM_SELECT_BULK,
+  PERM_DESELECT_BULK,
+  PERM_RESET_BULK_SELECT,
+  PERM_RESET_APPLY_SAME,
+  PERM_SET_APPLY_SAME_PERM,
+  PERM_DEL_APPLY_SAME_PERM,
   toggleColumn,
   toggleAllColumns,
   getFilterKey,
   getBasePermissionsState,
   updatePermissionsState,
   deleteFromPermissionsState,
+  updateBulkSelect,
+  updateApplySamePerms,
+  CREATE_NEW_PRESET,
+  DELETE_PRESET,
+  SET_PRESET_VALUE,
 } from '../TablePermissions/Actions';
 
 const modifyReducer = (tableName, schemas, modifyStateOrig, action) => {
@@ -102,21 +127,20 @@ const modifyReducer = (tableName, schemas, modifyStateOrig, action) => {
           isActive: true,
         },
       };
-    case REL_ADD_MANUAL_CLICKED:
+    case REL_NAME_CHANGED:
       return {
         ...modifyState,
         relAdd: {
           ...modifyState.relAdd,
-          isManualExpanded: true,
+          relName: action.relName,
         },
       };
-    case REL_NAME_CHANGED:
-      const relName = action.relName;
+    case MANUAL_REL_NAME_CHANGED:
       return {
         ...modifyState,
-        relAdd: {
-          ...modifyState.relAdd,
-          name: relName,
+        manualRelAdd: {
+          ...modifyState.manualRelAdd,
+          relName: action.relName,
         },
       };
     case REL_SELECTION_CHANGED:
@@ -125,134 +149,124 @@ const modifyReducer = (tableName, schemas, modifyStateOrig, action) => {
         ...modifyState,
         relAdd: {
           ...modifyState.relAdd,
-          name: '',
-          tableName: selectedRel.tableName,
+          relName: '',
+          lTable: selectedRel.lTable,
+          lSchema: selectedRel.lSchema,
           isObjRel: selectedRel.isObjRel,
           lcol: selectedRel.lcol,
           rTable: selectedRel.rTable,
+          rSchema: selectedRel.rSchema,
           rcol: selectedRel.rcol,
+          isUnique: selectedRel.isUnique,
         },
       };
     case REL_RESET:
       return {
         ...modifyState,
         relAdd: {
-          isActive: true,
-          tableName: '',
-          name: '',
-          isObjRel: null,
-          lcol: '',
-          rTable: null,
-          rcol: '',
-          manualColumns: [],
+          ...defaultModifyState.relAdd,
         },
       };
-    case REL_SET_TYPE:
+    case MANUAL_REL_RESET:
       return {
         ...modifyState,
-        relAdd: {
-          ...modifyState.relAdd,
-          isObjRel: action.isObjRel,
-          rTable: null,
-          rcol: '',
+        manualRelAdd: {
+          ...defaultModifyState.manualRelAdd,
         },
       };
-    case REL_SET_RTABLE:
+    case MANUAL_REL_SET_TYPE:
       return {
         ...modifyState,
-        relAdd: {
-          ...modifyState.relAdd,
+        manualRelAdd: {
+          ...modifyState.manualRelAdd,
+          relType: action.relType,
+        },
+      };
+    case MANUAL_REL_SET_RSCHEMA:
+      return {
+        ...modifyState,
+        manualRelAdd: {
+          ...modifyState.manualRelAdd,
+          rSchema: action.rSchema,
+          rTable: '',
+          colMappings: [...defaultModifyState.manualRelAdd.colMappings],
+        },
+      };
+    case MANUAL_REL_SET_RTABLE:
+      return {
+        ...modifyState,
+        manualRelAdd: {
+          ...modifyState.manualRelAdd,
           rTable: action.rTable,
+          colMappings: [...defaultModifyState.manualRelAdd.colMappings],
         },
       };
-    case REL_SET_LCOL:
+    case SET_MANUAL_REL_ADD:
       return {
         ...modifyState,
-        relAdd: {
-          ...modifyState.relAdd,
-          lcol: action.lcol,
+        manualRelAdd: action.manualRelAdd,
+      };
+    case TABLE_COMMENT_EDIT:
+      return {
+        ...modifyState,
+        tableCommentEdit: {
+          ...modifyState.tableCommentEdit,
+          enabled: action.data.enabled,
+          editedValue: action.data.value,
         },
       };
-    case REL_SET_RCOL:
+    case TABLE_COMMENT_INPUT_EDIT:
       return {
         ...modifyState,
-        relAdd: {
-          ...modifyState.relAdd,
-          rcol: action.rcol,
+        tableCommentEdit: {
+          ...modifyState.tableCommentEdit,
+          editedValue: action.value,
         },
       };
-    case REL_SET_MANUAL_COLUMNS:
+    case SET_COLUMN_EDIT:
       return {
         ...modifyState,
-        relAdd: {
-          ...modifyState.relAdd,
-          manualColumns: action.data,
+        columnEdit: {
+          ...modifyState.columnEdit,
+          [action.column]: { ...action.data },
         },
       };
-
-    case FK_RESET:
+    case RESET_COLUMN_EDIT:
+      const updatedColumnEdit = {
+        ...modifyState.columnEdit,
+      };
+      delete updatedColumnEdit[action.column];
       return {
         ...modifyState,
-        fkAdd: {
-          ...modifyState.fkAdd,
-          pairs: [],
-          lcol: '',
-          rcol: '',
-          refTable: '',
-          fkCheckBox: false,
+        columnEdit: updatedColumnEdit,
+      };
+    case EDIT_COLUMN:
+      return {
+        ...modifyState,
+        columnEdit: {
+          ...modifyState.columnEdit,
+          [action.column]: {
+            ...modifyState.columnEdit[action.column],
+            [action.key]: action.value,
+          },
         },
       };
-    case FK_SET_REF_TABLE:
-      return {
-        ...modifyState,
-        fkAdd: {
-          ...modifyState.fkAdd,
-          refTable: action.refTable,
-          rcol: '',
-        },
-      };
-    case FK_SET_L_COL:
-      return {
-        ...modifyState,
-        fkAdd: {
-          ...modifyState.fkAdd,
-          lcol: action.lcol,
-        },
-      };
-    case FK_SET_R_COL:
-      return {
-        ...modifyState,
-        fkAdd: {
-          ...modifyState.fkAdd,
-          rcol: action.rcol,
-        },
-      };
-    case FK_ADD_FORM_ERROR:
-      return {
-        ...modifyState,
-        ongoingRequest: false,
-        lastError: null,
-        lastFormError: action.errorMessage,
-        lastSuccess: false,
-      };
-    case TOGGLE_FK_CHECKBOX:
-      return {
-        ...modifyState,
-        fkAdd: {
-          ...modifyState.fkAdd,
-          fkCheckBox: action.checked,
-        },
-      };
-
     case PERM_OPEN_EDIT:
+      const isNewRole = modifyState.permissionsState.newRole === action.role;
+      const permState = getBasePermissionsState(
+        action.tableSchema,
+        action.role,
+        action.query,
+        isNewRole
+      );
       return {
         ...modifyState,
         permissionsState: {
-          ...getBasePermissionsState(
-            action.tableSchema,
-            action.role,
-            action.query
-          ),
+          ...permState,
+          isEditing: true,
+        },
+        prevPermissionState: {
+          ...permState,
         },
       };
 
@@ -285,8 +299,31 @@ const modifyReducer = (tableName, schemas, modifyStateOrig, action) => {
         },
       };
 
+    case PERM_TOGGLE_ALLOW_AGGREGATION:
+      return {
+        ...modifyState,
+        permissionsState: {
+          ...updatePermissionsState(
+            modifyState.permissionsState,
+            'allow_aggregations',
+            action.data
+          ),
+        },
+      };
+
+    case PERM_TOGGLE_MODIFY_LIMIT:
+      return {
+        ...modifyState,
+        permissionsState: {
+          ...updatePermissionsState(
+            modifyState.permissionsState,
+            'limit',
+            action.data
+          ),
+        },
+      };
+
     case PERM_SET_FILTER_SAME_AS:
-    case PERM_SET_FILTER:
       return {
         ...modifyState,
         permissionsState: {
@@ -296,6 +333,19 @@ const modifyReducer = (tableName, schemas, modifyStateOrig, action) => {
             action.filter
           ),
           custom_checked: false,
+        },
+      };
+
+    case PERM_SET_FILTER:
+      return {
+        ...modifyState,
+        permissionsState: {
+          ...updatePermissionsState(
+            modifyState.permissionsState,
+            getFilterKey(modifyState.permissionsState.query),
+            action.filter
+          ),
+          // custom_checked: true,
         },
       };
 
@@ -351,11 +401,17 @@ const modifyReducer = (tableName, schemas, modifyStateOrig, action) => {
       };
 
     case PERM_SET_ROLE_NAME:
+      const newRole = action.data;
+      const role = modifyState.permissionsState.isEditing
+        ? newRole
+        : modifyState.permissionsState.role;
+
       return {
         ...modifyState,
         permissionsState: {
           ...modifyState.permissionsState,
-          newRole: action.data,
+          newRole: newRole,
+          role: role,
         },
       };
 
@@ -364,14 +420,204 @@ const modifyReducer = (tableName, schemas, modifyStateOrig, action) => {
         ...modifyState,
       };
 
-    case TOGGLE_ACTIVE_COLUMN:
-      const newCol =
-        modifyState.activeEdit.column === action.column ? '' : action.column;
+    case PERM_SELECT_BULK:
       return {
         ...modifyState,
-        activeEdit: { ...modifyState.activeEdit, column: newCol },
+        permissionsState: {
+          ...modifyState.permissionsState,
+          bulkSelect: updateBulkSelect(
+            modifyState.permissionsState,
+            action.data,
+            true
+          ),
+        },
+      };
+    case PERM_DESELECT_BULK:
+      return {
+        ...modifyState,
+        permissionsState: {
+          ...modifyState.permissionsState,
+          bulkSelect: updateBulkSelect(
+            modifyState.permissionsState,
+            action.data,
+            false
+          ),
+        },
+      };
+    case PERM_SET_APPLY_SAME_PERM:
+      return {
+        ...modifyState,
+        permissionsState: {
+          ...modifyState.permissionsState,
+          applySamePermissions: updateApplySamePerms(
+            modifyState.permissionsState,
+            action.data
+          ),
+        },
+      };
+    case PERM_DEL_APPLY_SAME_PERM:
+      return {
+        ...modifyState,
+        permissionsState: {
+          ...modifyState.permissionsState,
+          applySamePermissions: updateApplySamePerms(
+            modifyState.permissionsState,
+            action.data,
+            true
+          ),
+        },
       };
 
+    /* Preset operations */
+    case CREATE_NEW_PRESET:
+      return {
+        ...modifyState,
+        permissionsState: {
+          ...modifyState.permissionsState,
+          [action.data.query]: {
+            ...modifyState.permissionsState[action.data.query],
+            localPresets: [
+              ...modifyState.permissionsState[action.data.query].localPresets,
+              { ...defaultPresetsState[action.data.query] },
+            ],
+          },
+        },
+      };
+    case DELETE_PRESET:
+      const deleteIndex = action.data.index;
+      return {
+        ...modifyState,
+        permissionsState: {
+          ...modifyState.permissionsState,
+          [action.data.queryType]: {
+            ...modifyState.permissionsState[action.data.queryType],
+            localPresets: [
+              ...modifyState.permissionsState[
+                action.data.queryType
+              ].localPresets.slice(0, deleteIndex),
+              ...modifyState.permissionsState[
+                action.data.queryType
+              ].localPresets.slice(
+                deleteIndex + 1,
+                modifyState.permissionsState[action.data.queryType].localPresets
+                  .length
+              ),
+            ],
+          },
+        },
+      };
+    case SET_PRESET_VALUE:
+      const updatedIndex = action.data.index;
+      const setKeyVal =
+        modifyState.permissionsState[action.data.queryType].localPresets[
+          updatedIndex
+        ];
+      setKeyVal[action.data.key] = action.data.value;
+      if (action.data.key === 'key') {
+        // Clear if key changes
+        setKeyVal.value = '';
+      }
+      return {
+        ...modifyState,
+        permissionsState: {
+          ...modifyState.permissionsState,
+          [action.data.queryType]: {
+            ...modifyState.permissionsState[action.data.queryType],
+            localPresets: [
+              ...modifyState.permissionsState[
+                action.data.queryType
+              ].localPresets.slice(0, updatedIndex),
+              { ...setKeyVal },
+              ...modifyState.permissionsState[
+                action.data.queryType
+              ].localPresets.slice(
+                updatedIndex + 1,
+                modifyState.permissionsState[action.data.queryType].localPresets
+                  .length
+              ),
+            ],
+          },
+        },
+      };
+    case PERM_RESET_BULK_SELECT:
+      return {
+        ...modifyState,
+        permissionsState: {
+          ...modifyState.permissionsState,
+          bulkSelect: [],
+        },
+      };
+    case PERM_RESET_APPLY_SAME:
+      return {
+        ...modifyState,
+        permissionsState: {
+          ...modifyState.permissionsState,
+          applySamePermissions: [],
+        },
+      };
+
+    case SET_PRIMARY_KEYS:
+      return {
+        ...modifyState,
+        pkModify: action.pks,
+      };
+    case SET_FOREIGN_KEYS:
+      return {
+        ...modifyState,
+        fkModify: action.fks,
+      };
+
+    case FETCH_COLUMN_TYPE_CASTS:
+      return {
+        ...modifyState,
+        alterColumnOptions: action.data,
+        alterColumnOptionsFetchErr: null,
+      };
+
+    case FETCH_COLUMN_TYPE_CASTS_FAIL:
+      return {
+        ...modifyState,
+        alterColumnOptions: [],
+        alterColumnOptionsFetchErr: action.data,
+      };
+
+    case SET_UNIQUE_KEYS:
+      return {
+        ...modifyState,
+        uniqueKeyModify: action.keys,
+      };
+    case TOGGLE_ENUM:
+      return {
+        ...modifyState,
+        tableEnum: {
+          loading: true,
+        },
+      };
+    case TOGGLE_ENUM_FAILURE:
+      return {
+        ...modifyState,
+        tableEnum: {
+          loading: false,
+          error: action.error,
+        },
+      };
+    case TOGGLE_ENUM_SUCCESS:
+      return {
+        ...modifyState,
+        tableEnum: {
+          loading: false,
+        },
+      };
+    case MODIFY_ROOT_FIELD:
+      return {
+        ...modifyState,
+        rootFieldsEdit: action.data,
+      };
+    case SET_CHECK_CONSTRAINTS:
+      return {
+        ...modifyState,
+        checkConstraintsModify: action.constraints,
+      };
     default:
       return modifyState;
   }

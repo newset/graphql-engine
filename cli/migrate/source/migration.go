@@ -1,6 +1,7 @@
 package source
 
 import (
+	"fmt"
 	"sort"
 )
 
@@ -47,9 +48,9 @@ func NewMigrations() *Migrations {
 	}
 }
 
-func (i *Migrations) Append(m *Migration) (ok bool) {
+func (i *Migrations) Append(m *Migration) (err error) {
 	if m == nil {
-		return false
+		return fmt.Errorf("migration cannot be nill")
 	}
 
 	if i.migrations[m.Version] == nil {
@@ -57,13 +58,13 @@ func (i *Migrations) Append(m *Migration) (ok bool) {
 	}
 
 	// reject duplicate versions
-	if _, dup := i.migrations[m.Version][m.Direction]; dup {
-		return false
+	if migration, dup := i.migrations[m.Version][m.Direction]; dup {
+		return fmt.Errorf("found duplicate migrations for version %d\n- %s\n- %s", m.Version, m.Raw, migration.Raw)
 	}
 
 	i.migrations[m.Version][m.Direction] = m
 	i.buildIndex()
-	return true
+	return nil
 }
 
 func (i *Migrations) buildIndex() {
@@ -163,6 +164,13 @@ func (i *Migrations) MetaDown(version uint64) (m *Migration, ok bool) {
 		}
 	}
 	return nil, false
+}
+
+func (i *Migrations) ReadName(version uint64) (name string) {
+	for k := range i.migrations[version] {
+		return i.migrations[version][k].Identifier
+	}
+	return "-"
 }
 
 func (i *Migrations) findPos(version uint64) int {

@@ -1,14 +1,19 @@
 import defaultState from './State';
 import Endpoints, { globalCookiePolicy } from '../../../../Endpoints';
-import { loadSchema } from '../DataActions';
+import {
+  handleMigrationErrors,
+  fetchTrackedFunctions,
+  fetchDataInit,
+} from '../DataActions';
 import {
   showErrorNotification,
   showSuccessNotification,
-} from '../Notification';
+} from '../../Common/Notification';
 import {
   loadMigrationStatus,
   UPDATE_MIGRATION_STATUS_ERROR,
 } from '../../../Main/Actions';
+import { parseCreateSQL } from './utils';
 import dataHeaders from '../Common/Headers';
 import returnMigrateUrl from '../Common/getMigrateUrl';
 
@@ -26,7 +31,7 @@ const MODAL_OPEN = 'EditItem/MODAL_OPEN';
 const modalOpen = () => ({ type: MODAL_OPEN });
 const modalClose = () => ({ type: MODAL_CLOSE });
 
-const executeSQL = isMigration => (dispatch, getState) => {
+const executeSQL = (isMigration, migrationName) => (dispatch, getState) => {
   dispatch({ type: MAKING_REQUEST });
   dispatch(showSuccessNotification('Executing the Query...'));
 
@@ -34,53 +39,50 @@ const executeSQL = isMigration => (dispatch, getState) => {
   const currMigrationMode = getState().main.migrationMode;
 
   const migrateUrl = returnMigrateUrl(currMigrationMode);
-  const currentSchema = getState().tables.currentSchema;
   const isCascadeChecked = getState().rawSQL.isCascadeChecked;
 
   let url = Endpoints.rawSQL;
+  const schemaChangesUp = [
+    {
+      type: 'run_sql',
+      args: { sql: sql, cascade: isCascadeChecked },
+    },
+  ];
+  // check if track view enabled
+
+  if (getState().rawSQL.isTableTrackChecked) {
+    const objects = parseCreateSQL(sql);
+
+    objects.forEach(object => {
+      const trackQuery = {
+        type: '',
+        args: {},
+      };
+
+      if (object.type === 'function') {
+        trackQuery.type = 'track_function';
+      } else {
+        trackQuery.type = 'add_existing_table_or_view';
+      }
+
+      trackQuery.args.name = object.name;
+      trackQuery.args.schema = object.schema;
+
+      schemaChangesUp.push(trackQuery);
+    });
+  }
+
   let requestBody = {
-    type: 'run_sql',
-    args: { sql: sql, cascade: isCascadeChecked },
+    type: 'bulk',
+    args: schemaChangesUp,
   };
   // check if its a migration and send to hasuractl migrate
   if (isMigration) {
     url = migrateUrl;
-    const schemaChangesUp = [
-      {
-        type: 'run_sql',
-        args: { sql: sql, cascade: isCascadeChecked },
-      },
-    ];
-    // check if track view enabled
-    if (getState().rawSQL.isTableTrackChecked) {
-      const regExp = /create (view|table) (\S+)/i;
-      const matches = sql.match(regExp);
-      let trackViewName = matches[2];
-      if (trackViewName.indexOf('.') !== -1) {
-        trackViewName = matches[2].split('.')[1];
-      }
-      const trackQuery = {
-        type: 'add_existing_table_or_view',
-        args: {
-          name: trackViewName.trim(),
-          schema: currentSchema,
-        },
-      };
-      schemaChangesUp.push(trackQuery);
-    }
-    const upQuery = {
-      type: 'bulk',
-      args: schemaChangesUp,
-    };
-    const downQuery = {
-      type: 'bulk',
-      args: [],
-    };
-    const migrationName = 'run_sql_migration';
     requestBody = {
       name: migrationName,
-      up: upQuery.args,
-      down: downQuery.args,
+      up: schemaChangesUp,
+      down: [],
     };
   }
   const options = {
@@ -98,9 +100,10 @@ const executeSQL = isMigration => (dispatch, getState) => {
               dispatch(loadMigrationStatus());
             }
             dispatch(showSuccessNotification('SQL executed!'));
-            dispatch(loadSchema()).then(() => {
+            dispatch(fetchDataInit()).then(() => {
               dispatch({ type: REQUEST_SUCCESS, data });
             });
+            dispatch(fetchTrackedFunctions());
           },
           err => {
             const parsedErrorMsg = err;
@@ -109,48 +112,29 @@ const executeSQL = isMigration => (dispatch, getState) => {
             dispatch(
               showErrorNotification(
                 'SQL execution failed!',
-                'Something is wrong. Data sent back an invalid response json.',
-                requestBody,
+                'Something is wrong. Received an invalid response json.',
                 parsedErrorMsg
               )
             );
             dispatch({
               type: REQUEST_ERROR,
-              data:
-                'Something is wrong. Data sent back an invalid response json.',
+              data: 'Something is wrong. Received an invalid response json.',
             });
-            console.err('Error with response', err);
+            console.err('RunSQL error: ', err);
           }
         );
         return;
       }
       response.json().then(
         errorMsg => {
+          const title = 'SQL Execution Failed';
           dispatch({ type: UPDATE_MIGRATION_STATUS_ERROR, data: errorMsg });
           dispatch({ type: REQUEST_ERROR, data: errorMsg });
-          const parsedErrorMsg = errorMsg;
-          if (typeof parsedErrorMsg !== 'object') {
-            parsedErrorMsg.message = JSON.parse(errorMsg).message;
+          if (isMigration) {
+            dispatch(handleMigrationErrors(title, errorMsg));
+          } else {
+            dispatch(showErrorNotification(title, errorMsg.code, errorMsg));
           }
-          if (parsedErrorMsg.code === 'data_api_error') {
-            parsedErrorMsg.message = JSON.parse(errorMsg.message);
-          } else if (parsedErrorMsg.code === 'postgres-error') {
-            if (parsedErrorMsg.internal) {
-              parsedErrorMsg.message = parsedErrorMsg.internal;
-            } else {
-              parsedErrorMsg.message = { error: parsedErrorMsg.error };
-            }
-          } else if (parsedErrorMsg.code === 'dependency-error') {
-            parsedErrorMsg.message = errorMsg.error;
-          }
-          dispatch(
-            showErrorNotification(
-              'SQL execution failed!',
-              parsedErrorMsg.message.error,
-              requestBody,
-              parsedErrorMsg
-            )
-          );
         },
         () => {
           dispatch(
@@ -201,7 +185,11 @@ const rawSQLReducer = (state = defaultState, action) => {
         lastSuccess: null,
       };
     case REQUEST_SUCCESS:
-      if (action.data && action.data.result_type === 'CommandOk') {
+      if (
+        action.data &&
+        action.data[0] &&
+        action.data[0].result_type === 'CommandOk'
+      ) {
         return {
           ...state,
           ongoingRequest: false,
@@ -217,8 +205,8 @@ const rawSQLReducer = (state = defaultState, action) => {
         lastError: null,
         lastSuccess: true,
         resultType: 'tuples',
-        result: action.data.result.slice(1),
-        resultHeaders: action.data.result[0],
+        result: action.data[0].result.slice(1),
+        resultHeaders: action.data[0].result[0],
       };
     case REQUEST_ERROR:
       return {

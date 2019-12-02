@@ -1,6 +1,8 @@
 __pycache__/
 dist
 cabal-dev
+Pipfile
+Pipfile.lock
 *.o
 *.hi
 *.chi
@@ -18,7 +20,8 @@ cabal.config
 *.aux
 *.hp
 TAGS
-.stack-work
+.stack-work*
+*.log
 
 # ws related
 ws/

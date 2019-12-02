@@ -1,21 +1,20 @@
-{-# LANGUAGE ConstraintKinds   #-}
-{-# LANGUAGE FlexibleContexts  #-}
-{-# LANGUAGE OverloadedStrings #-}
-
 module Hasura.RQL.Types.Error
        ( Code(..)
        , QErr(..)
        , encodeQErr
+       , encodeGQLErr
        , noInternalQErrEnc
        , err400
        , err404
        , err401
        , err500
+       , internalError
 
        , QErrM
        , throw400
        , throw404
        , throw500
+       , throw500WithDetail
        , throw401
 
          -- Aeson helpers
@@ -25,6 +24,7 @@ module Hasura.RQL.Types.Error
          -- Modify error messages
        , modifyErr
        , modifyErrAndSet500
+       , modifyQErr
 
          -- Attach context
        , withPathK
@@ -33,6 +33,7 @@ module Hasura.RQL.Types.Error
        , indexedForM
        , indexedMapM
        , indexedForM_
+       , indexedMapM_
        ) where
 
 import           Data.Aeson
@@ -67,35 +68,61 @@ data Code
   | AlreadyUntracked
   | InvalidParams
   | AlreadyInit
+  | ConstraintViolation
+  | DataException
+  | BadRequest
   -- Graphql error
   | NoTables
   | ValidationFailed
+  | Busy
+  -- JWT Auth errors
+  | JWTRoleClaimMissing
+  | JWTInvalidClaims
+  | JWTInvalid
+  | JWTInvalidKey
+  -- Remote schemas
+  | RemoteSchemaError
+  | RemoteSchemaConflicts
+  -- Websocket/Subscription errors
+  | StartFailed
   deriving (Eq)
 
 instance Show Code where
-  show NotNullViolation  = "not-null-violation"
-  show PermissionDenied  = "permission-denied"
-  show NotExists         = "not-exists"
-  show AlreadyExists     = "already-exists"
-  show AlreadyTracked    = "already-tracked"
-  show AlreadyUntracked  = "already-untracked"
-  show PostgresError     = "postgres-error"
-  show NotSupported      = "not-supported"
-  show DependencyError   = "dependency-error"
-  show InvalidHeaders    = "invalid-headers"
-  show InvalidJSON       = "invalid-json"
-  show AccessDenied      = "access-denied"
-  show ParseFailed       = "parse-failed"
-  show ConstraintError   = "constraint-error"
-  show PermissionError   = "permission-error"
-  show NotFound          = "not-found"
-  show Unexpected        = "unexpected"
-  show UnexpectedPayload = "unexpected-payload"
-  show NoUpdate          = "no-update"
-  show InvalidParams     = "invalid-params"
-  show AlreadyInit       = "already-initialised"
-  show NoTables          = "no-tables"
-  show ValidationFailed  = "validation-failed"
+  show = \case
+    NotNullViolation      -> "not-null-violation"
+    DataException         -> "data-exception"
+    BadRequest            -> "bad-request"
+    ConstraintViolation   -> "constraint-violation"
+    PermissionDenied      -> "permission-denied"
+    NotExists             -> "not-exists"
+    AlreadyExists         -> "already-exists"
+    AlreadyTracked        -> "already-tracked"
+    AlreadyUntracked      -> "already-untracked"
+    PostgresError         -> "postgres-error"
+    NotSupported          -> "not-supported"
+    DependencyError       -> "dependency-error"
+    InvalidHeaders        -> "invalid-headers"
+    InvalidJSON           -> "invalid-json"
+    AccessDenied          -> "access-denied"
+    ParseFailed           -> "parse-failed"
+    ConstraintError       -> "constraint-error"
+    PermissionError       -> "permission-error"
+    NotFound              -> "not-found"
+    Unexpected            -> "unexpected"
+    UnexpectedPayload     -> "unexpected-payload"
+    NoUpdate              -> "no-update"
+    InvalidParams         -> "invalid-params"
+    AlreadyInit           -> "already-initialised"
+    NoTables              -> "no-tables"
+    ValidationFailed      -> "validation-failed"
+    Busy                  -> "busy"
+    JWTRoleClaimMissing   -> "jwt-missing-role-claims"
+    JWTInvalidClaims      -> "jwt-invalid-claims"
+    JWTInvalid            -> "invalid-jwt"
+    JWTInvalidKey         -> "invalid-jwt-key"
+    RemoteSchemaError     -> "remote-schema-error"
+    RemoteSchemaConflicts -> "remote-schema-conflicts"
+    StartFailed           -> "start-failed"
 
 data QErr
   = QErr
@@ -128,6 +155,20 @@ noInternalQErrEnc (QErr jPath _ msg code _) =
   , "error" .= msg
   , "code"  .= show code
   ]
+
+encodeGQLErr :: Bool -> QErr -> Value
+encodeGQLErr includeInternal (QErr jPath _ msg code mIE) =
+  object
+  [ "message" .= msg
+  , "extensions" .= extnsObj
+  ]
+  where
+    extnsObj = object $ bool codeAndPath
+               (codeAndPath ++ internal) includeInternal
+    codeAndPath = [ "code" .= show code
+                  , "path" .= encodeJSONPath jPath
+                  ]
+    internal = maybe [] (\ie -> ["internal" .= ie]) mIE
 
 -- whether internal should be included or not
 encodeQErr :: Bool -> QErr -> Value
@@ -179,7 +220,14 @@ throw401 :: (QErrM m) => T.Text -> m a
 throw401 t = throwError $ err401 AccessDenied t
 
 throw500 :: (QErrM m) => T.Text -> m a
-throw500 t = throwError $ err500 Unexpected t
+throw500 t = throwError $ internalError t
+
+internalError :: Text -> QErr
+internalError = err500 Unexpected
+
+throw500WithDetail :: (QErrM m) => T.Text -> Value -> m a
+throw500WithDetail t detail =
+  throwError $ (err500 Unexpected t) {qeInternal = Just detail}
 
 modifyQErr :: (QErrM m)
            => (QErr -> QErr) -> m a -> m a
@@ -239,6 +287,10 @@ indexedForM_ :: (QErrM m)
 indexedForM_ l f =
   forM_ (zip [0..] l) $ \(i, a) ->
     withPathE (Index i) (f a)
+
+indexedMapM_ :: (QErrM m)
+            => (a -> m ()) -> [a] -> m ()
+indexedMapM_ = flip indexedForM_
 
 liftIResult :: (QErrM m) => IResult a -> m a
 liftIResult (IError path msg) =
